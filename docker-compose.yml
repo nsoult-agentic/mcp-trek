@@ -9,7 +9,7 @@
 
 services:
   mcp-trek:
-    image: ghcr.io/nsoult-agentic/mcp-trek:sha-03452b7
+    image: ghcr.io/nsoult-agentic/mcp-trek:sha-31c925a
     container_name: mcp-trek
     restart: unless-stopped
 
