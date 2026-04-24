@@ -59,24 +59,32 @@ async function proxyToTrek(req: Request): Promise<Response> {
   try {
     const body = await req.arrayBuffer();
 
+    const outHeaders: Record<string, string> = {
+      "Content-Type": req.headers.get("Content-Type") || "application/json",
+      "Authorization": `Bearer ${TREK_TOKEN}`,
+      "Accept": req.headers.get("Accept") || "application/json, text/event-stream",
+    };
+    const sessionId = req.headers.get("Mcp-Session-Id");
+    if (sessionId) outHeaders["Mcp-Session-Id"] = sessionId;
+
     const trekRes = await fetch(trekMcpUrl, {
       method: req.method,
-      headers: {
-        "Content-Type": req.headers.get("Content-Type") || "application/json",
-        "Authorization": `Bearer ${TREK_TOKEN}`,
-        "Accept": req.headers.get("Accept") || "application/json, text/event-stream",
-      },
+      headers: outHeaders,
       body: body.byteLength > 0 ? body : undefined,
       signal: AbortSignal.timeout(30_000),
     });
 
-    // Forward the response as-is, preserving streaming
+    // Forward the response as-is, preserving streaming + session header
+    const resHeaders: Record<string, string> = {
+      "Content-Type": trekRes.headers.get("Content-Type") || "application/json",
+    };
+    const resSessionId = trekRes.headers.get("Mcp-Session-Id");
+    if (resSessionId) resHeaders["Mcp-Session-Id"] = resSessionId;
+
     return new Response(trekRes.body, {
       status: trekRes.status,
       statusText: trekRes.statusText,
-      headers: {
-        "Content-Type": trekRes.headers.get("Content-Type") || "application/json",
-      },
+      headers: resHeaders,
     });
   } catch (err) {
     console.error("[mcp-trek] Proxy error:", err instanceof Error ? err.message : "unknown");
