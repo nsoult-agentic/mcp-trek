@@ -61,7 +61,7 @@ async function proxyToTrek(req: Request): Promise<Response> {
   try {
     const outHeaders: Record<string, string> = {
       "Authorization": `Bearer ${TREK_TOKEN}`,
-      "Accept": req.headers.get("Accept") || "application/json, text/event-stream",
+      "Accept": "application/json, text/event-stream",
     };
     const sessionId = req.headers.get("Mcp-Session-Id");
     if (sessionId) outHeaders["Mcp-Session-Id"] = sessionId;
