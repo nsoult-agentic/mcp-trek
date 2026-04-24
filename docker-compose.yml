@@ -16,8 +16,9 @@ services:
     # ── Network ──
     ports:
       - "127.0.0.1:8911:8911"  # Loopback ONLY
-    extra_hosts:
-      - "host.docker.internal:host-gateway"  # Access TREK on host
+    networks:
+      - default
+      - npm_network
 
     # ── Security Hardening ──
     read_only: true
@@ -53,5 +54,9 @@ services:
       - NODE_ENV=production
       - SECRETS_DIR=/secrets
       - PORT=8911
-      - TREK_URL=http://host.docker.internal:8910
+      - TREK_URL=http://trek:3000
       # NEVER put secrets here — TREK token is read from /secrets/trek-token
+
+networks:
+  npm_network:
+    external: true
