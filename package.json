@@ -1,0 +1,14 @@
+{
+  "name": "mcp-trek",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/http.ts",
+    "test": "bun test"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/bun": "^1.3.9",
+    "typescript": "^5.9.3"
+  }
+}

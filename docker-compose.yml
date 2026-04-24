@@ -1,0 +1,57 @@
+# docker-compose.yml for mcp-trek
+# MCP proxy — forwards Claude Code requests to TREK's native MCP endpoint
+# Deploy: Portainer → Stacks → Add from Repository → GitOps polling
+# CI/CD: GitHub Actions builds image on push, updates this tag automatically
+#
+# SECURITY: This file follows PAI hardened container policy.
+# Do NOT add: docker.sock mounts, privileged mode, host network/PID,
+# extra capabilities, or secrets in environment variables.
+
+services:
+  mcp-trek:
+    image: ghcr.io/nsoult-agentic/mcp-trek:latest
+    container_name: mcp-trek
+    restart: unless-stopped
+
+    # ── Network ──
+    ports:
+      - "127.0.0.1:8911:8911"  # Loopback ONLY
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # Access TREK on host
+
+    # ── Security Hardening ──
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    # ── Resource Limits ──
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+          cpus: "0.25"
+
+    # ── Filesystem ──
+    volumes:
+      # Secrets — root-owned on host, read-only in container
+      - /srv/mcp-trek/secrets:/secrets:ro
+    tmpfs:
+      - /tmp:size=32m,noexec,nosuid
+
+    # ── Health Check ──
+    healthcheck:
+      test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:8911/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    # ── Environment ──
+    environment:
+      - NODE_ENV=production
+      - SECRETS_DIR=/secrets
+      - PORT=8911
+      - TREK_URL=http://host.docker.internal:8910
+      # NEVER put secrets here — TREK token is read from /secrets/trek-token
