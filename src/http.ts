@@ -1,19 +1,28 @@
 /**
- * MCP proxy for TREK — auth boundary isolation.
- * Proxies MCP requests to TREK's native /mcp endpoint.
+ * MCP Bridge for TREK — eliminates protocol mismatch.
  *
- * TREK has 150+ native MCP tools. This server does NOT reimplement them.
- * It accepts MCP requests from Claude Code, injects the TREK API token
- * (stored inside this container), and forwards to TREK.
+ * Problem: Claude Code uses stateless HTTP MCP. TREK uses session-based MCP.
+ * A raw HTTP proxy forwards the protocol mismatch. This bridge terminates
+ * both protocols independently:
  *
- * This follows the established PAI MCP pattern:
- *   Claude Code → mcp-trek (bearer auth) → TREK (internal token)
- *   Secrets stay inside the container. Claude Code never sees TREK_TOKEN.
+ *   Claude Code → stateless HTTP MCP → this bridge → persistent MCP client → TREK
  *
- * Usage: PORT=8911 SECRETS_DIR=/secrets TREK_URL=http://host.docker.internal:8910 bun run src/http.ts
+ * Server side: one Server + transport per request (stateless, same as all 9 working MCP servers)
+ * Client side: persistent MCP Client session with TREK (auto-reconnects on expiry)
+ *
+ * Tools are fetched from TREK dynamically — no hardcoded tool definitions.
+ * Auth token stays inside this container. Claude Code never sees it.
  */
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import {
+  ListToolsRequestSchema,
+  CallToolRequestSchema,
+} from "@modelcontextprotocol/sdk/types.js";
 
 // ── Configuration ──────────────────────────────────────────
 const PORT = Number(process.env["PORT"]) || 8911;
@@ -25,9 +34,7 @@ function loadTrekToken(): string {
   const tokenPath = resolve(SECRETS_DIR, "trek-token");
   try {
     const token = readFileSync(tokenPath, "utf-8").trim();
-    if (token.length === 0) {
-      throw new Error("TREK token file is empty");
-    }
+    if (token.length === 0) throw new Error("Empty");
     return token;
   } catch {
     throw new Error("Failed to load TREK API token. Check secrets mount.");
@@ -36,14 +43,87 @@ function loadTrekToken(): string {
 
 const TREK_TOKEN = loadTrekToken();
 
+// ── TREK Client (persistent session) ──────────────────────
+let trekClient: Client | null = null;
+let trekInstructions: string | undefined;
+
+async function connectToTrek(): Promise<Client> {
+  const client = new Client(
+    { name: "mcp-trek-bridge", version: "0.2.0" },
+    { capabilities: {} },
+  );
+
+  const transport = new StreamableHTTPClientTransport(
+    new URL(`${TREK_URL}/mcp`),
+    {
+      requestInit: {
+        headers: { Authorization: `Bearer ${TREK_TOKEN}` },
+      },
+    },
+  );
+
+  await client.connect(transport);
+  console.log("[mcp-trek] Connected to TREK MCP");
+  return client;
+}
+
+async function getTrekClient(): Promise<Client> {
+  if (!trekClient) {
+    trekClient = await connectToTrek();
+  }
+  return trekClient;
+}
+
+async function reconnectTrek(): Promise<Client> {
+  if (trekClient) {
+    try {
+      await trekClient.close();
+    } catch { /* ignore close errors */ }
+  }
+  trekClient = await connectToTrek();
+  return trekClient;
+}
+
+// ── Server factory (one per request, stateless) ───────────
+
+function createServer(): Server {
+  const server = new Server(
+    { name: "mcp-trek", version: "0.2.0" },
+    {
+      capabilities: { tools: {} },
+      instructions: trekInstructions,
+    },
+  );
+
+  // Forward tools/list → TREK
+  server.setRequestHandler(ListToolsRequestSchema, async (request) => {
+    const client = await getTrekClient();
+    return await client.listTools(request.params);
+  });
+
+  // Forward tools/call → TREK (with one reconnect retry)
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const client = await getTrekClient();
+    try {
+      return await client.callTool(request.params);
+    } catch {
+      // Session may have expired — reconnect and retry once
+      const reconnected = await reconnectTrek();
+      return await reconnected.callTool(request.params);
+    }
+  });
+
+  return server;
+}
+
 // ── Rate Limiter ──────────────────────────────────────────
-const RATE_LIMIT = 30; // max requests per window
-const RATE_WINDOW_MS = 60_000; // 1 minute
+const RATE_LIMIT = 30;
+const RATE_WINDOW_MS = 60_000;
 const requestTimestamps: number[] = [];
 
 function isRateLimited(): boolean {
   const now = Date.now();
-  while (requestTimestamps.length > 0 && requestTimestamps[0] < now - RATE_WINDOW_MS) {
+  while (requestTimestamps.length > 0 && requestTimestamps[0]! < now - RATE_WINDOW_MS) {
     requestTimestamps.shift();
   }
   if (requestTimestamps.length >= RATE_LIMIT) return true;
@@ -51,77 +131,31 @@ function isRateLimited(): boolean {
   return false;
 }
 
-// ── Proxy ─────────────────────────────────────────────────
+// ── Health Check ──────────────────────────────────────────
 
-const MAX_BODY_SIZE = 1_048_576; // 1MB — MCP payloads are small JSON
-
-async function proxyToTrek(req: Request): Promise<Response> {
-  const trekMcpUrl = `${TREK_URL}/mcp`;
-
+async function healthCheck(): Promise<Response> {
   try {
-    const outHeaders: Record<string, string> = {
-      "Authorization": `Bearer ${TREK_TOKEN}`,
-      "Accept": "application/json, text/event-stream",
-    };
-    const sessionId = req.headers.get("Mcp-Session-Id");
-    if (sessionId) outHeaders["Mcp-Session-Id"] = sessionId;
-
-    // Only read body for POST; enforce 1MB size limit to prevent OOM
-    let body: ArrayBuffer | undefined;
-    if (req.method === "POST") {
-      const contentLength = Number(req.headers.get("Content-Length") || "0");
-      if (contentLength > MAX_BODY_SIZE) {
-        return new Response(
-          JSON.stringify({ jsonrpc: "2.0", error: { code: -32000, message: "Payload too large" }, id: null }),
-          { status: 413, headers: { "Content-Type": "application/json" } },
-        );
-      }
-      body = await req.arrayBuffer();
-      if (body.byteLength > MAX_BODY_SIZE) {
-        return new Response(
-          JSON.stringify({ jsonrpc: "2.0", error: { code: -32000, message: "Payload too large" }, id: null }),
-          { status: 413, headers: { "Content-Type": "application/json" } },
-        );
-      }
-      outHeaders["Content-Type"] = req.headers.get("Content-Type") || "application/json";
-    }
-
-    // POST: 30s timeout (request/response). GET/DELETE: no timeout (SSE streams are long-lived).
-    const signal = req.method === "POST" ? AbortSignal.timeout(30_000) : undefined;
-
-    const trekRes = await fetch(trekMcpUrl, {
-      method: req.method,
-      headers: outHeaders,
-      body,
-      signal,
-    });
-
-    // TREK's /mcp endpoint initializes asynchronously (~3 min after API start).
-    // 404 during this window means "not ready yet" — translate to 503 so
-    // Claude Code's MCP client retries instead of permanently giving up.
-    if (trekRes.status === 404) {
-      return new Response(
-        JSON.stringify({ jsonrpc: "2.0", error: { code: -32000, message: "TREK MCP not yet ready" }, id: null }),
-        { status: 503, headers: { "Content-Type": "application/json", "Retry-After": "5" } },
-      );
-    }
-
-    // Forward all response headers — don't strip SSE headers (Cache-Control, etc.)
-    const resHeaders = new Headers();
-    for (const [key, value] of trekRes.headers.entries()) {
-      resHeaders.set(key, value);
-    }
-
-    return new Response(trekRes.body, {
-      status: trekRes.status,
-      statusText: trekRes.statusText,
-      headers: resHeaders,
-    });
-  } catch (err) {
-    console.error("[mcp-trek] Proxy error:", err instanceof Error ? err.message : "unknown");
+    const client = await getTrekClient();
+    const { tools } = await client.listTools();
     return new Response(
-      JSON.stringify({ jsonrpc: "2.0", error: { code: -32000, message: "TREK upstream unavailable" }, id: null }),
-      { status: 502, headers: { "Content-Type": "application/json" } },
+      JSON.stringify({
+        status: "ok",
+        service: "mcp-trek",
+        port: PORT,
+        trek: "connected",
+        tools: tools.length,
+      }),
+      { headers: { "Content-Type": "application/json" } },
+    );
+  } catch {
+    return new Response(
+      JSON.stringify({
+        status: "degraded",
+        service: "mcp-trek",
+        port: PORT,
+        trek: "disconnected",
+      }),
+      { status: 503, headers: { "Content-Type": "application/json" } },
     );
   }
 }
@@ -134,54 +168,58 @@ const httpServer = Bun.serve({
   async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
 
-    if (url.pathname === "/health") {
-      // Quick health check — verify we can reach TREK
-      try {
-        const trekHealth = await fetch(`${TREK_URL}/api/health`, {
-          signal: AbortSignal.timeout(5_000),
-        });
-        return new Response(
-          JSON.stringify({
-            status: "ok",
-            service: "mcp-trek",
-            port: PORT,
-            trek_upstream: trekHealth.ok ? "ok" : `error:${trekHealth.status}`,
-          }),
-          { headers: { "Content-Type": "application/json" } },
-        );
-      } catch {
-        return new Response(
-          JSON.stringify({
-            status: "degraded",
-            service: "mcp-trek",
-            port: PORT,
-            trek_upstream: "unreachable",
-          }),
-          { status: 503, headers: { "Content-Type": "application/json" } },
-        );
-      }
-    }
+    if (url.pathname === "/health") return healthCheck();
 
     if (url.pathname === "/mcp") {
       if (isRateLimited()) {
-        return new Response("Rate limit exceeded", { status: 429 });
+        return new Response("Too Many Requests", { status: 429 });
       }
-      return proxyToTrek(req);
+      const transport = new WebStandardStreamableHTTPServerTransport({
+        sessionIdGenerator: undefined, // stateless — same as all working MCP servers
+      });
+      const server = createServer();
+      await server.connect(transport);
+      return transport.handleRequest(req);
     }
 
     return new Response("Not Found", { status: 404 });
   },
 });
 
-console.log(`mcp-trek proxy listening on http://0.0.0.0:${PORT}/mcp`);
-console.log(`Proxying to TREK at ${TREK_URL}/mcp`);
+// ── Startup ───────────────────────────────────────────────
+
+async function startup() {
+  const MAX_RETRIES = 12;
+  const RETRY_DELAY = 5_000; // 5s — TREK MCP init takes ~3min after API start
+
+  for (let i = 0; i < MAX_RETRIES; i++) {
+    try {
+      trekClient = await connectToTrek();
+      const { tools } = await trekClient.listTools();
+      console.log(`[mcp-trek] TREK tools loaded: ${tools.length} tools available`);
+      return;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : "unknown";
+      console.log(`[mcp-trek] TREK not ready (attempt ${i + 1}/${MAX_RETRIES}): ${msg}`);
+      trekClient = null;
+      if (i < MAX_RETRIES - 1) await new Promise((r) => setTimeout(r, RETRY_DELAY));
+    }
+  }
+  console.error("[mcp-trek] Failed to connect to TREK after retries. Will retry on first request.");
+}
+
+console.log(`mcp-trek bridge listening on http://0.0.0.0:${PORT}/mcp`);
+console.log(`Bridging to TREK at ${TREK_URL}/mcp`);
+startup();
 
 process.on("SIGTERM", () => {
   httpServer.stop();
+  if (trekClient) trekClient.close();
   process.exit(0);
 });
 
 process.on("SIGINT", () => {
   httpServer.stop();
+  if (trekClient) trekClient.close();
   process.exit(0);
 });
