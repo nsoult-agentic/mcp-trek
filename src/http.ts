@@ -96,12 +96,21 @@ async function proxyToTrek(req: Request): Promise<Response> {
       signal,
     });
 
-    // Forward the response as-is, preserving streaming + session header
-    const resHeaders: Record<string, string> = {
-      "Content-Type": trekRes.headers.get("Content-Type") || "application/json",
-    };
-    const resSessionId = trekRes.headers.get("Mcp-Session-Id");
-    if (resSessionId) resHeaders["Mcp-Session-Id"] = resSessionId;
+    // TREK's /mcp endpoint initializes asynchronously (~3 min after API start).
+    // 404 during this window means "not ready yet" — translate to 503 so
+    // Claude Code's MCP client retries instead of permanently giving up.
+    if (trekRes.status === 404) {
+      return new Response(
+        JSON.stringify({ jsonrpc: "2.0", error: { code: -32000, message: "TREK MCP not yet ready" }, id: null }),
+        { status: 503, headers: { "Content-Type": "application/json", "Retry-After": "5" } },
+      );
+    }
+
+    // Forward all response headers — don't strip SSE headers (Cache-Control, etc.)
+    const resHeaders = new Headers();
+    for (const [key, value] of trekRes.headers.entries()) {
+      resHeaders.set(key, value);
+    }
 
     return new Response(trekRes.body, {
       status: trekRes.status,
