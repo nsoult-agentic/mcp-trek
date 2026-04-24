@@ -53,25 +53,47 @@ function isRateLimited(): boolean {
 
 // ── Proxy ─────────────────────────────────────────────────
 
+const MAX_BODY_SIZE = 1_048_576; // 1MB — MCP payloads are small JSON
+
 async function proxyToTrek(req: Request): Promise<Response> {
   const trekMcpUrl = `${TREK_URL}/mcp`;
 
   try {
-    const body = await req.arrayBuffer();
-
     const outHeaders: Record<string, string> = {
-      "Content-Type": req.headers.get("Content-Type") || "application/json",
       "Authorization": `Bearer ${TREK_TOKEN}`,
       "Accept": req.headers.get("Accept") || "application/json, text/event-stream",
     };
     const sessionId = req.headers.get("Mcp-Session-Id");
     if (sessionId) outHeaders["Mcp-Session-Id"] = sessionId;
 
+    // Only read body for POST; enforce 1MB size limit to prevent OOM
+    let body: ArrayBuffer | undefined;
+    if (req.method === "POST") {
+      const contentLength = Number(req.headers.get("Content-Length") || "0");
+      if (contentLength > MAX_BODY_SIZE) {
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", error: { code: -32000, message: "Payload too large" }, id: null }),
+          { status: 413, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      body = await req.arrayBuffer();
+      if (body.byteLength > MAX_BODY_SIZE) {
+        return new Response(
+          JSON.stringify({ jsonrpc: "2.0", error: { code: -32000, message: "Payload too large" }, id: null }),
+          { status: 413, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      outHeaders["Content-Type"] = req.headers.get("Content-Type") || "application/json";
+    }
+
+    // POST: 30s timeout (request/response). GET/DELETE: no timeout (SSE streams are long-lived).
+    const signal = req.method === "POST" ? AbortSignal.timeout(30_000) : undefined;
+
     const trekRes = await fetch(trekMcpUrl, {
       method: req.method,
       headers: outHeaders,
-      body: body.byteLength > 0 ? body : undefined,
-      signal: AbortSignal.timeout(30_000),
+      body,
+      signal,
     });
 
     // Forward the response as-is, preserving streaming + session header
