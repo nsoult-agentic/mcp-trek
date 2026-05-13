@@ -57,6 +57,54 @@ services:
       - TREK_URL=http://trek:3000
       # NEVER put secrets here — TREK token is read from /secrets/trek-token
 
+  # ── Lucy's bridge instance (separate token, separate port) ──
+  mcp-trek-lucy:
+    image: ghcr.io/nsoult-agentic/mcp-trek:sha-34d9118
+    container_name: mcp-trek-lucy
+    restart: unless-stopped
+
+    # ── Network ──
+    ports:
+      - "0.0.0.0:8916:8916"  # LAN accessible — Lucy's Claude Desktop
+    networks:
+      - default
+      - npm_network
+
+    # ── Security Hardening ──
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+    # ── Resource Limits ──
+    deploy:
+      resources:
+        limits:
+          memory: 128m
+          cpus: "0.25"
+
+    # ── Filesystem ──
+    volumes:
+      - /srv/mcp-trek-lucy/secrets:/secrets:ro
+    tmpfs:
+      - /tmp:size=32m,noexec,nosuid
+
+    # ── Health Check ──
+    healthcheck:
+      test: ["CMD", "bun", "-e", "fetch('http://127.0.0.1:8916/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+    # ── Environment ──
+    environment:
+      - NODE_ENV=production
+      - SECRETS_DIR=/secrets
+      - PORT=8916
+      - TREK_URL=http://trek:3000
+
 networks:
   npm_network:
     external: true
