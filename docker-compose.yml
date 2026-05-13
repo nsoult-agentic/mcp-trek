@@ -55,7 +55,8 @@ services:
       - SECRETS_DIR=/secrets
       - PORT=8911
       - TREK_URL=http://trek:3000
-      # NEVER put secrets here — TREK token is read from /secrets/trek-token
+      - TOKEN_FILE=trek-token-neil
+      # NEVER put secrets here — TREK token is read from /secrets/$TOKEN_FILE
 
   # ── Lucy's bridge instance (separate token, separate port) ──
   mcp-trek-lucy:
@@ -86,7 +87,7 @@ services:
 
     # ── Filesystem ──
     volumes:
-      - /srv/mcp-trek-lucy/secrets:/secrets:ro
+      - /srv/mcp-trek/secrets:/secrets:ro
     tmpfs:
       - /tmp:size=32m,noexec,nosuid
 
@@ -104,6 +105,7 @@ services:
       - SECRETS_DIR=/secrets
       - PORT=8916
       - TREK_URL=http://trek:3000
+      - TOKEN_FILE=trek-token-lucy
 
 networks:
   npm_network:

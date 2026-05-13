@@ -31,7 +31,8 @@ const TREK_URL = process.env["TREK_URL"] || "http://host.docker.internal:8910";
 
 // Read TREK API token from file (NEVER from env var)
 function loadTrekToken(): string {
-  const tokenPath = resolve(SECRETS_DIR, "trek-token");
+  const tokenFile = process.env["TOKEN_FILE"] || "trek-token";
+  const tokenPath = resolve(SECRETS_DIR, tokenFile);
   try {
     const token = readFileSync(tokenPath, "utf-8").trim();
     if (token.length === 0) throw new Error("Empty");
