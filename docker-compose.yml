@@ -15,7 +15,7 @@ services:
 
     # ── Network ──
     ports:
-      - "127.0.0.1:8911:8911"  # Loopback ONLY
+      - "0.0.0.0:8911:8911"  # LAN accessible — shared with Lucy's Claude Desktop
     networks:
       - default
       - npm_network
