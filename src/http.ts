@@ -97,7 +97,7 @@ let trekInstructions: string | undefined;
 
 async function connectToTrek(): Promise<Client> {
   const client = new Client(
-    { name: "mcp-trek-bridge", version: "0.3.0" },
+    { name: "mcp-trek-bridge", version: "0.3.1" },
     { capabilities: {} },
   );
 
@@ -137,7 +137,7 @@ async function reconnectTrek(): Promise<Client> {
 
 function createServer(): Server {
   const server = new Server(
-    { name: "mcp-trek", version: "0.3.0" },
+    { name: "mcp-trek", version: "0.3.1" },
     {
       capabilities: { tools: {} },
       instructions: trekInstructions,
@@ -184,15 +184,24 @@ function isRateLimited(): boolean {
 
 async function healthCheck(): Promise<Response> {
   try {
-    const client = await getTrekClient();
-    const { tools } = await client.listTools();
+    let toolCount: number;
+    try {
+      const client = await getTrekClient();
+      toolCount = (await client.listTools()).tools.length;
+    } catch {
+      // Stale/expired session (TREK restarted, or the OAuth token expired while
+      // the bridge was idle) — reconnect with a fresh token/session and retry
+      // once, so idle bridges self-heal instead of perpetually 404-ing.
+      const client = await reconnectTrek();
+      toolCount = (await client.listTools()).tools.length;
+    }
     return new Response(
       JSON.stringify({
         status: "ok",
         service: "mcp-trek",
         port: PORT,
         trek: "connected",
-        tools: tools.length,
+        tools: toolCount,
       }),
       { headers: { "Content-Type": "application/json" } },
     );

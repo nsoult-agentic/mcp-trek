@@ -1,6 +1,6 @@
 {
   "name": "mcp-trek",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "type": "module",
   "scripts": {
     "start": "bun run src/http.ts",
