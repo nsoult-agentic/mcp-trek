@@ -29,20 +29,67 @@ const PORT = Number(process.env["PORT"]) || 8911;
 const SECRETS_DIR = process.env["SECRETS_DIR"] || "/secrets";
 const TREK_URL = process.env["TREK_URL"] || "http://host.docker.internal:8910";
 
-// Read TREK API token from file (NEVER from env var)
-function loadTrekToken(): string {
-  const tokenFile = process.env["TOKEN_FILE"] || "trek-token";
-  const tokenPath = resolve(SECRETS_DIR, tokenFile);
+// Auth mode: OAuth 2.1 client_credentials when CLIENT_ID is set (TREK v3.1.0+),
+// otherwise fall back to the legacy static API token (deprecated by TREK).
+const CLIENT_ID = process.env["CLIENT_ID"];
+// Optional space-delimited scope override. Omitted by default so TREK issues a
+// token covering the OAuth client's full registered scope set.
+const TREK_SCOPE = process.env["TREK_SCOPE"];
+
+// Read a single-value secret from a file (NEVER from an env var).
+function loadSecretFile(envVar: string, defaultName: string, label: string): string {
+  const name = process.env[envVar] || defaultName;
+  const path = resolve(SECRETS_DIR, name);
   try {
-    const token = readFileSync(tokenPath, "utf-8").trim();
-    if (token.length === 0) throw new Error("Empty");
-    return token;
+    const value = readFileSync(path, "utf-8").trim();
+    if (value.length === 0) throw new Error("Empty");
+    return value;
   } catch {
-    throw new Error("Failed to load TREK API token. Check secrets mount.");
+    throw new Error(`Failed to load TREK ${label}. Check secrets mount.`);
   }
 }
 
-const TREK_TOKEN = loadTrekToken();
+// ── OAuth 2.1 (client_credentials grant) ───────────────────
+let cachedToken: { value: string; expiresAt: number } | null = null;
+
+async function fetchOAuthToken(): Promise<string> {
+  const now = Date.now();
+  // Reuse the cached access token until 60s before it expires.
+  if (cachedToken && cachedToken.expiresAt > now + 60_000) return cachedToken.value;
+
+  const body = new URLSearchParams({
+    grant_type: "client_credentials",
+    client_id: CLIENT_ID!,
+    client_secret: loadSecretFile("SECRET_FILE", "trek-oauth-secret", "OAuth client secret"),
+  });
+  if (TREK_SCOPE) body.set("scope", TREK_SCOPE);
+
+  const res = await fetch(`${TREK_URL}/oauth/token`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/x-www-form-urlencoded",
+      Accept: "application/json",
+    },
+    body,
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`OAuth token request failed: ${res.status} ${detail.slice(0, 200)}`);
+  }
+  const json = (await res.json()) as { access_token?: string; expires_in?: number };
+  if (!json.access_token) throw new Error("OAuth token response missing access_token");
+  cachedToken = {
+    value: json.access_token,
+    expiresAt: now + (json.expires_in ?? 3600) * 1000,
+  };
+  return cachedToken.value;
+}
+
+// Resolve the Authorization header for a fresh TREK connection.
+async function getAuthHeader(): Promise<string> {
+  if (CLIENT_ID) return `Bearer ${await fetchOAuthToken()}`;
+  return `Bearer ${loadSecretFile("TOKEN_FILE", "trek-token", "API token")}`;
+}
 
 // ── TREK Client (persistent session) ──────────────────────
 let trekClient: Client | null = null;
@@ -50,7 +97,7 @@ let trekInstructions: string | undefined;
 
 async function connectToTrek(): Promise<Client> {
   const client = new Client(
-    { name: "mcp-trek-bridge", version: "0.2.0" },
+    { name: "mcp-trek-bridge", version: "0.3.0" },
     { capabilities: {} },
   );
 
@@ -58,13 +105,13 @@ async function connectToTrek(): Promise<Client> {
     new URL(`${TREK_URL}/mcp`),
     {
       requestInit: {
-        headers: { Authorization: `Bearer ${TREK_TOKEN}` },
+        headers: { Authorization: await getAuthHeader() },
       },
     },
   );
 
   await client.connect(transport);
-  console.log("[mcp-trek] Connected to TREK MCP");
+  console.log(`[mcp-trek] Connected to TREK MCP (${CLIENT_ID ? "oauth" : "static-token"})`);
   return client;
 }
 
@@ -76,6 +123,7 @@ async function getTrekClient(): Promise<Client> {
 }
 
 async function reconnectTrek(): Promise<Client> {
+  cachedToken = null; // force a fresh OAuth token — the reconnect may be due to token expiry/invalidation
   if (trekClient) {
     try {
       await trekClient.close();
@@ -89,7 +137,7 @@ async function reconnectTrek(): Promise<Client> {
 
 function createServer(): Server {
   const server = new Server(
-    { name: "mcp-trek", version: "0.2.0" },
+    { name: "mcp-trek", version: "0.3.0" },
     {
       capabilities: { tools: {} },
       instructions: trekInstructions,

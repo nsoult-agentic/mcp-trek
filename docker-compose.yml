@@ -55,8 +55,13 @@ services:
       - SECRETS_DIR=/secrets
       - PORT=8911
       - TREK_URL=http://trek:3000
+      # OAuth 2.1 client_credentials (TREK v3.1.0+). CLIENT_ID is an identifier,
+      # not a secret; the client secret is read from /secrets/$SECRET_FILE.
+      - CLIENT_ID=854096ef-ea67-4157-aa6b-0f612408432c
+      - SECRET_FILE=trek-oauth-secret-neil
+      # Legacy fallback (ignored while CLIENT_ID is set) — remove CLIENT_ID to revert.
       - TOKEN_FILE=trek-token-neil
-      # NEVER put secrets here — TREK token is read from /secrets/$TOKEN_FILE
+      # NEVER put secrets here — credentials are read from files under /secrets
 
   # ── Lucy's bridge instance (separate token, separate port) ──
   mcp-trek-lucy:
