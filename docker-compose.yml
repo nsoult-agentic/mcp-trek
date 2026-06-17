@@ -9,7 +9,7 @@
 
 services:
   mcp-trek:
-    image: ghcr.io/nsoult-agentic/mcp-trek:sha-bb47df5
+    image: ghcr.io/nsoult-agentic/mcp-trek:sha-d4db08f
     container_name: mcp-trek
     restart: unless-stopped
 
@@ -65,7 +65,7 @@ services:
 
   # ── Lucy's bridge instance (separate token, separate port) ──
   mcp-trek-lucy:
-    image: ghcr.io/nsoult-agentic/mcp-trek:sha-bb47df5
+    image: ghcr.io/nsoult-agentic/mcp-trek:sha-d4db08f
     container_name: mcp-trek-lucy
     restart: unless-stopped
 
