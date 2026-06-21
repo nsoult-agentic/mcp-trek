@@ -19,10 +19,16 @@ import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import {
-  ListToolsRequestSchema,
-  CallToolRequestSchema,
-} from "@modelcontextprotocol/sdk/types.js";
+  RATE_LIMIT,
+  RATE_WINDOW_MS,
+  pruneAndCheckRateLimit,
+  type CachedToken,
+  isTokenFresh,
+  computeExpiresAt,
+  buildClientCredentialsBody,
+} from "./bridge-logic.js";
 
 // ── Configuration ──────────────────────────────────────────
 const PORT = Number(process.env["PORT"]) || 8911;
@@ -50,19 +56,18 @@ function loadSecretFile(envVar: string, defaultName: string, label: string): str
 }
 
 // ── OAuth 2.1 (client_credentials grant) ───────────────────
-let cachedToken: { value: string; expiresAt: number } | null = null;
+let cachedToken: CachedToken | null = null;
 
 async function fetchOAuthToken(): Promise<string> {
   const now = Date.now();
   // Reuse the cached access token until 60s before it expires.
-  if (cachedToken && cachedToken.expiresAt > now + 60_000) return cachedToken.value;
+  if (isTokenFresh(cachedToken, now)) return cachedToken.value;
 
-  const body = new URLSearchParams({
-    grant_type: "client_credentials",
-    client_id: CLIENT_ID!,
-    client_secret: loadSecretFile("SECRET_FILE", "trek-oauth-secret", "OAuth client secret"),
-  });
-  if (TREK_SCOPE) body.set("scope", TREK_SCOPE);
+  const body = buildClientCredentialsBody(
+    CLIENT_ID!,
+    loadSecretFile("SECRET_FILE", "trek-oauth-secret", "OAuth client secret"),
+    TREK_SCOPE,
+  );
 
   const res = await fetch(`${TREK_URL}/oauth/token`, {
     method: "POST",
@@ -80,7 +85,7 @@ async function fetchOAuthToken(): Promise<string> {
   if (!json.access_token) throw new Error("OAuth token response missing access_token");
   cachedToken = {
     value: json.access_token,
-    expiresAt: now + (json.expires_in ?? 3600) * 1000,
+    expiresAt: computeExpiresAt(now, json.expires_in),
   };
   return cachedToken.value;
 }
@@ -96,19 +101,13 @@ let trekClient: Client | null = null;
 let trekInstructions: string | undefined;
 
 async function connectToTrek(): Promise<Client> {
-  const client = new Client(
-    { name: "mcp-trek-bridge", version: "0.3.1" },
-    { capabilities: {} },
-  );
+  const client = new Client({ name: "mcp-trek-bridge", version: "0.3.1" }, { capabilities: {} });
 
-  const transport = new StreamableHTTPClientTransport(
-    new URL(`${TREK_URL}/mcp`),
-    {
-      requestInit: {
-        headers: { Authorization: await getAuthHeader() },
-      },
+  const transport = new StreamableHTTPClientTransport(new URL(`${TREK_URL}/mcp`), {
+    requestInit: {
+      headers: { Authorization: await getAuthHeader() },
     },
-  );
+  });
 
   await client.connect(transport);
   console.log(`[mcp-trek] Connected to TREK MCP (${CLIENT_ID ? "oauth" : "static-token"})`);
@@ -127,7 +126,9 @@ async function reconnectTrek(): Promise<Client> {
   if (trekClient) {
     try {
       await trekClient.close();
-    } catch { /* ignore close errors */ }
+    } catch {
+      /* ignore close errors */
+    }
   }
   trekClient = await connectToTrek();
   return trekClient;
@@ -166,18 +167,10 @@ function createServer(): Server {
 }
 
 // ── Rate Limiter ──────────────────────────────────────────
-const RATE_LIMIT = 30;
-const RATE_WINDOW_MS = 60_000;
 const requestTimestamps: number[] = [];
 
 function isRateLimited(): boolean {
-  const now = Date.now();
-  while (requestTimestamps.length > 0 && requestTimestamps[0]! < now - RATE_WINDOW_MS) {
-    requestTimestamps.shift();
-  }
-  if (requestTimestamps.length >= RATE_LIMIT) return true;
-  requestTimestamps.push(now);
-  return false;
+  return pruneAndCheckRateLimit(requestTimestamps, Date.now(), RATE_LIMIT, RATE_WINDOW_MS);
 }
 
 // ── Health Check ──────────────────────────────────────────
