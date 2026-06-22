@@ -20,6 +20,7 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import {
   RATE_LIMIT,
   RATE_WINDOW_MS,
@@ -59,12 +60,17 @@ function loadSecretFile(envVar: string, defaultName: string, label: string): str
 let cachedToken: CachedToken | null = null;
 
 async function fetchOAuthToken(): Promise<string> {
+  // Invariant: only reached when OAuth mode is active (CLIENT_ID set); guard so
+  // the type is provably narrowed and the secret never goes out without a client id.
+  if (CLIENT_ID === undefined) {
+    throw new Error("OAuth token requested without CLIENT_ID configured");
+  }
   const now = Date.now();
   // Reuse the cached access token until 60s before it expires.
   if (isTokenFresh(cachedToken, now)) return cachedToken.value;
 
   const body = buildClientCredentialsBody(
-    CLIENT_ID!,
+    CLIENT_ID,
     loadSecretFile("SECRET_FILE", "trek-oauth-secret", "OAuth client secret"),
     TREK_SCOPE,
   );
@@ -109,7 +115,11 @@ async function connectToTrek(): Promise<Client> {
     },
   });
 
-  await client.connect(transport);
+  // The SDK's StreamableHTTPClientTransport.sessionId getter is `string | undefined`,
+  // while the Transport interface declares `sessionId?: string`; under
+  // exactOptionalPropertyTypes these differ only in modeling (no runtime impact),
+  // so narrow to the interface the SDK itself accepts.
+  await client.connect(transport as Transport);
   console.log(`[mcp-trek] Connected to TREK MCP (${CLIENT_ID ? "oauth" : "static-token"})`);
   return client;
 }
@@ -141,7 +151,9 @@ function createServer(): Server {
     { name: "mcp-trek", version: "0.3.1" },
     {
       capabilities: { tools: {} },
-      instructions: trekInstructions,
+      // Include `instructions` only when set — under exactOptionalPropertyTypes,
+      // an explicit `undefined` is not assignable to the optional `instructions?`.
+      ...(trekInstructions !== undefined ? { instructions: trekInstructions } : {}),
     },
   );
 
@@ -225,9 +237,10 @@ const httpServer = Bun.serve({
       if (isRateLimited()) {
         return new Response("Too Many Requests", { status: 429 });
       }
-      const transport = new WebStandardStreamableHTTPServerTransport({
-        sessionIdGenerator: undefined, // stateless — same as all working MCP servers
-      });
+      // Stateless mode: omit sessionIdGenerator entirely (equivalent to leaving it
+      // undefined) — same as all working MCP servers. An explicit `undefined` is
+      // rejected under exactOptionalPropertyTypes.
+      const transport = new WebStandardStreamableHTTPServerTransport({});
       const server = createServer();
       await server.connect(transport);
       return transport.handleRequest(req);

@@ -1,4 +1,4 @@
-name: Test mcp-accounting
+name: Test mcp-trek
 
 on:
   pull_request:
