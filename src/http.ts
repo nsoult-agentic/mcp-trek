@@ -104,7 +104,6 @@ async function getAuthHeader(): Promise<string> {
 
 // ── TREK Client (persistent session) ──────────────────────
 let trekClient: Client | null = null;
-let trekInstructions: string | undefined;
 
 async function connectToTrek(): Promise<Client> {
   const client = new Client({ name: "mcp-trek-bridge", version: "0.3.1" }, { capabilities: {} });
@@ -151,9 +150,6 @@ function createServer(): Server {
     { name: "mcp-trek", version: "0.3.1" },
     {
       capabilities: { tools: {} },
-      // Include `instructions` only when set — under exactOptionalPropertyTypes,
-      // an explicit `undefined` is not assignable to the optional `instructions?`.
-      ...(trekInstructions !== undefined ? { instructions: trekInstructions } : {}),
     },
   );
 
