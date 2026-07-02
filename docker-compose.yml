@@ -11,6 +11,8 @@ services:
   mcp-trek:
     image: ghcr.io/nsoult-agentic/mcp-trek:sha-df81491
     container_name: mcp-trek
+    labels:
+      - "diun.enable=false"  # our own CI/sha-built image; diun watches third-party only (brain #2538)
     restart: unless-stopped
 
     # ── Network ──
@@ -67,6 +69,8 @@ services:
   mcp-trek-lucy:
     image: ghcr.io/nsoult-agentic/mcp-trek:sha-df81491
     container_name: mcp-trek-lucy
+    labels:
+      - "diun.enable=false"  # our own CI/sha-built image; diun watches third-party only (brain #2538)
     restart: unless-stopped
 
     # ── Network ──
